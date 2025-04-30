@@ -1,0 +1,388 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 2023/11/29 15:03:20
+// Design Name: 
+// Module Name: Vhrle_16_Cell
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module Vhrle_16_Cell#(
+    parameter this_id = 0,
+    parameter ID_WIDTH = 4,
+    parameter BUS_WIDTH = 32
+)(
+    input wire clk,
+    input wire rst_n,
+    input wire [ID_WIDTH-1:0]slave_id,
+    input wire [BUS_WIDTH-1:0]slave_data,
+    input wire slave_valid,
+    input wire slave_begin_flag,
+    input wire slave_last_flag,
+    output reg slave_req,
+    output reg [15:0]data,
+    output reg [31:0]addr,
+    output reg data_valid,
+    output reg [BUS_WIDTH-1:0]row
+    );
+reg begin_decode;
+reg run_decode;    
+reg finish_decode;
+reg req_a_new_line_flag;
+
+// fifo controller 
+reg trans_en;
+reg trans_finish;
+reg [BUS_WIDTH-1:0]fifo_din;
+reg fifo_wr_en;
+wire fifo_full;   
+reg fifo_rd_en;
+wire  [3:0]fifo_dout;
+wire fifo_empty;
+wire fifo_dout_valid;
+
+reg [3:0]code_new;
+reg code_new_valid;
+
+reg [2:0]makeword_state;
+parameter makeword_idle = 0;
+parameter makeword_launch = 1;
+parameter makeword_fill = 2;
+parameter makeword_finish = 3;
+
+reg [2:0]state;
+parameter idle = 0;  
+parameter find_char = 1;
+parameter find_zero_count_width = 2;
+parameter find_zero_length = 3;
+parameter find_end=4;
+reg [31:0]delta_idx;
+reg [31:0]idx;
+reg [3:0]cnt;//cnt is 1,2,3,...15
+reg [3:0]char;
+reg char_flag;
+reg char_end;
+
+reg [31:0]idx_front,idx_behind;
+reg [3:0]char_front,char_behind;
+reg char_flag_front,char_flag_behind;
+reg char_end_behind;
+//req data
+/*always@(posedge clk)begin
+    if(~rst_n)begin
+        req_a_new_line_flag<=0;
+    end else if(req_a_new_line_flag||slave_req)begin
+        req_a_new_line_flag<=0;
+    end else if(makeword_state==makeword_idle)begin
+        req_a_new_line_flag<=1;
+    end
+end
+*/
+reg fifo_clr;
+always@(posedge clk)begin
+    if(~rst_n)begin
+        slave_req<=0;
+        row<=0;
+        begin_decode<=0;
+        trans_en<=0;
+        fifo_clr<=0;
+    end else if(begin_decode)begin
+        begin_decode<=0;
+        fifo_clr<=0;
+    end else if((slave_id==this_id)&&slave_begin_flag&&slave_valid&&slave_req)begin
+        slave_req<=0;
+        row<=slave_data;
+        begin_decode<=1;
+        trans_en<=1;
+        fifo_clr<=1;
+     end else if(trans_finish)begin
+        trans_en<=0;
+    end else if((slave_id==this_id)&&slave_valid)begin
+        trans_en<=1;
+    end else if(makeword_state==makeword_idle)begin
+        slave_req<=1;
+        trans_en<=0;
+    end
+end
+//write data to Decoder_Input_Buffer
+always@(posedge clk)begin
+    if(~rst_n)begin
+        fifo_din<=32'h0;
+        fifo_wr_en<=0;
+        trans_finish<=0;
+    end else if(trans_finish)begin
+        fifo_din<=32'h0;
+        fifo_wr_en<=0;
+        trans_finish<=0;
+    end else if(trans_en&&slave_valid) begin
+        fifo_din<=slave_data;
+        fifo_wr_en<=trans_en;
+        trans_finish<=slave_last_flag;
+    end 
+end
+
+//decode step 1:read data from Decoder_Input_Buffer
+
+always@(posedge clk)begin
+    if(~rst_n)begin
+        fifo_rd_en<=0;
+    end else if(run_decode)begin
+        if(fifo_empty|finish_decode)begin
+            fifo_rd_en<=0;
+        end else begin
+            fifo_rd_en<=1;
+        end
+    end else begin
+        fifo_rd_en<=0;
+    end
+end
+//Decoder_Input_Buffer --->code_new 
+
+always@(posedge clk)begin
+    if(~rst_n)begin
+        code_new<=0;
+        code_new_valid<=0;
+    end else if(fifo_dout_valid)begin
+        code_new<=fifo_dout;
+        code_new_valid<=fifo_dout_valid;
+    end else begin
+        code_new<=0;
+        code_new_valid<=0;
+    end
+end
+
+always@(posedge clk)begin
+    if(~rst_n)begin
+        run_decode<=0;
+    end else if(finish_decode)begin
+        run_decode<=0;
+    end else if(begin_decode)begin
+        run_decode<=1;
+    end
+end
+
+//decode step 1:find char '0'and find non char'0' calculate it's idx 
+
+
+always@(posedge clk)begin
+    if(~rst_n)begin
+        state<=idle;
+    end else begin
+        case(state)
+            idle: begin//0
+                if(run_decode) state<=find_char;
+                else begin
+                    char<=4'h0;
+                    char_flag<=4'h0;
+                    delta_idx<='h0;
+                    idx<='h0-1;
+                    char_end<=0;
+                end
+            end
+            find_char:begin//1
+                if(code_new_valid&&(code_new==4'h0))begin
+                    state<=find_zero_count_width;
+                    delta_idx<='h0;
+                    char<=4'h0;
+                    char_flag<=4'h0;
+                    idx<=idx;
+                end else if(code_new_valid&&(code_new!=4'h0))begin
+                    delta_idx<='h0;
+                    char_flag<=1;
+                    char<=code_new;
+                    idx<=idx+1;
+                    state<=state;
+                    char_end<=0;
+                end else begin
+                    delta_idx<='h0;
+                    char<=4'h0;
+                    char_flag<=4'h0;
+                    idx<=idx;
+                end
+            end
+            find_zero_count_width:begin//2
+                if(code_new_valid&&(code_new==4'h0))begin
+                    state<=find_end;
+                    char<=4'h0;
+                    char_flag<=4'h0;
+                    delta_idx<='h0;
+                    idx<='h0;
+                    char_end<=1;
+                end else if(code_new_valid&&(code_new!=4'h0))begin
+                    state<=find_zero_length;
+                    cnt<=code_new;
+                end
+            end
+            find_zero_length:begin//3
+                if((cnt=='h1)&&code_new_valid)begin
+                    state<=find_char;
+                    delta_idx<={delta_idx[27:0],code_new};
+                    idx<=idx+{delta_idx[27:0],code_new};
+                    cnt<=0;
+                    char<=4'h0;
+                    char_flag<=0;
+                    char_end<=0;
+                end
+                if((cnt!='h1)&&code_new_valid)begin
+                    delta_idx<={delta_idx[27:0],code_new};
+                    char<=4'h0;
+                    char_flag<=0;
+                    cnt<=cnt-1;
+                end
+            end
+            find_end:begin
+                if(finish_decode)begin
+                    state<=idle;
+                end else begin
+                    char<=4'h0;
+                    char_flag<=4'h0;
+                    delta_idx<='h0;
+                    idx<='h0;
+                    char_end<= char_end;
+                end
+            end
+        endcase
+    end
+end
+
+//decode step 2:use char and char's idx calculate non'0'word's addr
+//the char and it's idx have 4 situations 
+//(1):the idx[1:0]==2'b00 show this char is the first char in the word         [x,-,-,-]
+//(2):the idx[1:0]==2'b01 show this char is the second char in the word    [-,x,-,-]  
+//(3):the idx[1:0]==2'b10 show this char is the three char in the word      [-,-,x,-]
+//(4):the idx[1:0]==2'b11 show this char is the four char in the word        [-,-,-,x]
+
+//if idx_behind - idx_front >3  we can output the word and addr
+//addr=idx_front[31:2]
+//  etc.  <-----  char_front    <------ char_behiond <-------  etc.
+
+always@(posedge clk)begin
+    if(~rst_n)begin
+        idx_behind<='h0;
+        char_behind<='h0;
+        char_flag_behind<=0;
+        char_end_behind<=0;
+    end else begin
+        idx_behind<=idx;
+        char_behind<=char;
+        char_flag_behind<=char_flag;
+        char_end_behind<=char_end;
+    end
+end
+always@(posedge clk)begin
+    if(~rst_n || begin_decode)begin
+        idx_front<='h0;
+        char_front<='h0;
+        char_flag_front<=0;
+    end else if(char_flag_behind)begin
+        idx_front<=idx_behind;
+        char_front<=char_behind;
+        char_flag_front<=char_flag_behind;
+    end
+end
+/*
+output reg [15:0]data,
+    output reg [31:0]addr,
+    output reg data_valid
+*/
+
+
+always@(posedge clk)begin
+    if(~rst_n)begin
+        makeword_state<=makeword_idle;
+    end else begin
+        case(makeword_state)
+            makeword_idle:begin
+                data<='h0;
+                addr<='h0;
+                data_valid<=0;
+                finish_decode<=0;
+                if(begin_decode) makeword_state<=makeword_fill;
+            end
+            makeword_fill:begin
+                if(data_valid)begin
+                        data<='h0;
+                        data_valid<='h0;
+                        addr<='h0;
+                    end
+                if((char_flag_front)&&((char_flag_behind)||char_end_behind))begin
+                    if (idx_front[1:0]==2'b00) begin
+                        data[15:12]<=char_front[3:0];
+                    end else if(idx_front[1:0]==2'b01)begin
+                        data[11:8]<=char_front[3:0];
+                    end else if (idx_front[1:0]==2'b10) begin
+                        data[7:4]<=char_front[3:0];
+                    end else begin
+                        data[3:0]<=char_front[3:0];
+                    end
+                        
+                    if ((idx_behind[31:2]!=idx_front[31:2])||(char_end_behind)) begin
+                        data_valid<=1;
+                        addr<=idx_front[31:2];
+                    end else begin
+                        data_valid<=0;
+                        addr<=idx_front[31:2];
+                    end
+                    
+                    if(char_end_behind)  makeword_state<=makeword_finish;
+                end else if(data_valid)begin
+                    data_valid<='h0;
+                    addr<='h0;
+                end 
+            end
+            makeword_finish:begin
+                finish_decode<=1;
+                data<='h0;
+                addr<='h0;
+                data_valid<=0;
+                makeword_state<=makeword_idle;
+            end
+        endcase
+    end
+end
+//req_a_new_line_flag
+/*
+SCFIFO32to4 Decoder_Input_Buffer(
+  .clk(clk),      // input wire clk
+  .srst(~rst_n),    // input wire srst
+  .din(fifo_din),      // input wire [31 : 0] din
+  .wr_en(fifo_wr_en),  // input wire wr_en
+  .rd_en(fifo_rd_en),  // input wire rd_en
+  .dout(fifo_dout),    // output wire [3 : 0] dout
+  .full(fifo_full),    // output wire full
+  .empty(fifo_empty)  // output wire empty
+);
+*/
+scfifo #(
+    .DEPTH(1024),//input 
+    .I_WIDTH(32),
+    .O_WIDTH(4) //it can be 32 , 16 , 8 , 4 , 2 , 1
+) Decoder_Input_Buffer(
+    .clk(clk),
+    .rst_n(rst_n),
+    .wr_en(fifo_wr_en),
+    .din(fifo_din),
+    .rd_en(fifo_rd_en),
+    .empty(fifo_empty),
+    .full(fifo_full),
+    .dout(fifo_dout),
+    .overflow(),
+    .underflow(),
+    .dout_valid(fifo_dout_valid),
+    .fifo_clr(fifo_clr)
+);
+
+endmodule
